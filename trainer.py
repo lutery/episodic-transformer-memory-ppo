@@ -23,16 +23,16 @@ class PPOTrainer:
             device {torch.device, optional} -- Determines the training device. Defaults to cpu.
         """
         # Set members
-        self.config = config
-        self.device = device
-        self.run_id = run_id
-        self.num_workers = config["n_workers"]
-        self.lr_schedule = config["learning_rate_schedule"]
-        self.beta_schedule = config["beta_schedule"]
-        self.cr_schedule = config["clip_range_schedule"]
-        self.memory_length = config["transformer"]["memory_length"]
-        self.num_blocks = config["transformer"]["num_blocks"]
-        self.embed_dim = config["transformer"]["embed_dim"]
+        self.config = config # 训练的配置文件
+        self.device = device # 运行的设备
+        self.run_id = run_id # 本次训练的id
+        self.num_workers = config["n_workers"] # 工作线程数量
+        self.lr_schedule = config["learning_rate_schedule"] # 学习率调度
+        self.beta_schedule = config["beta_schedule"] # beta调度 todo 用处
+        self.cr_schedule = config["clip_range_schedule"] # 剪切范围调度 todo 用处
+        self.memory_length = config["transformer"]["memory_length"] # 记忆长度 
+        self.num_blocks = config["transformer"]["num_blocks"] # transformer块数量
+        self.embed_dim = config["transformer"]["embed_dim"] # 嵌入维度
 
         # Setup Tensorboard Summary Writer
         if not os.path.exists("./summaries"):
@@ -100,6 +100,7 @@ class PPOTrainer:
 
     def run_training(self) -> None:
         """Runs the entire training logic from sampling data to optimizing the model. Only the final model is saved."""
+        # 这里是训练的主流程代码
         print("Step 6: Starting training using " + str(self.device))
         # Store episode results for monitoring statistics
         episode_infos = deque(maxlen=100)
@@ -363,6 +364,7 @@ class PPOTrainer:
 
     def close(self) -> None:
         """Terminates the trainer and all related processes."""
+        # 释放训练资源
         try:
             self.dummy_env.close()
         except:
