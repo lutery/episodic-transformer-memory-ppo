@@ -12,11 +12,14 @@ def create_env(config:dict, render:bool=False):
     """Initializes an environment based on the provided environment name.
     
     Arguments:
-        env_name {str}: Name of the to be instantiated environment
-        render {bool}: Whether to instantiate the environment in render mode. (default: {False})
+        env_name {str}: Name of the to be instantiated environment 创建环境参数的一些配置
+        render {bool}: Whether to instantiate the environment in render mode. (default: {False}) 是否开启界面显示
 
     Returns:
-        {env}: Returns the selected environment instance.
+        {env}: Returns the selected environment instance. 返回创建号的环境实例
+        todo 先看PocMemoryEnv 在看Minigrid
+
+        这里创建环境，没有看到特殊的包装器，可能是因为自己
     """
     if config["type"] == "PocMemoryEnv":
         return PocMemoryEnv(glob=False, freeze=True, max_episode_steps=32)
@@ -26,6 +29,7 @@ def create_env(config:dict, render:bool=False):
         return CartPole(mask_velocity=True)
     if config["type"] == "Minigrid":
         return Minigrid(config["name"])
+    # todo 据说这里是将不同的环境封装为统一的调用环境接口，感觉这里是应该是将其他的游戏环境（"SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"）进行包装
     if config["type"] in ["SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"]:
         return MemoryGymWrapper(env_name = config["name"], reset_params=config["reset_params"], realtime_mode=render)
 

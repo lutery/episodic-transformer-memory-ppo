@@ -5,6 +5,7 @@ from utils import create_env
 
 def worker_process(remote: multiprocessing.connection.Connection, config:dict) -> None:
     """Executes the threaded interface to the environment.
+    在子现场中执行的与环境交互的逻辑，并返回交互的返回值
     
     Arguments:
         remote {multiprocessing.connection.Connection} -- Parent thread
@@ -12,6 +13,7 @@ def worker_process(remote: multiprocessing.connection.Connection, config:dict) -
     """
     # Spawn training environment
     try:
+        # 真正的创建环境并进行交互的地方
         env = create_env(config)
     except KeyboardInterrupt:
         pass
@@ -43,7 +45,7 @@ class Worker:
         Arguments:
             env_config {dict} -- Configuration of the training environment
         """
-        self.child, parent = multiprocessing.Pipe()
+        self.child, parent = multiprocessing.Pipe() # 构建进程之间的通信管道
         self.process = multiprocessing.Process(target=worker_process, args=(parent, env_config))
         self.process.start()
 

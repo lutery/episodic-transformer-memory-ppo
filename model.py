@@ -12,21 +12,22 @@ class ActorCriticModel(nn.Module):
         """Model setup
 
         Arguments:
-            config {dict} -- Configuration and hyperparameters of the environment, trainer and model.
+            config {dict} -- Configuration and hyperparameters of the environment, trainer and model. 训练用的各种超参数
             observation_space {box} -- Properties of the agent's observation space
             action_space_shape {tuple} -- Dimensions of the action space
             max_episode_length {int} -- The maximum number of steps in an episode
         """
         super().__init__()
-        self.hidden_size = config["hidden_layer_size"]
-        self.memory_layer_size = config["transformer"]["embed_dim"]
-        self.observation_space_shape = observation_space.shape
+        self.hidden_size = config["hidden_layer_size"] # 隐藏层的维度
+        self.memory_layer_size = config["transformer"]["embed_dim"] # 记忆层的维度 todo 
+        self.observation_space_shape = observation_space.shape # 观察空间的shape todo 应该是用在输入尺寸上
         self.max_episode_length = max_episode_length
 
-        # Observation encoder
+        # Observation encoder 这里是针对不同的输入，比如图像和一维的数据
         if len(self.observation_space_shape) > 1:
             # Case: visual observation is available
             # Visual encoder made of 3 convolutional layers
+            # 如果是可视化图像，则将图像的特征压缩为一维特征
             self.conv1 = nn.Conv2d(observation_space.shape[0], 32, 8, 4,)
             self.conv2 = nn.Conv2d(32, 64, 4, 2, 0)
             self.conv3 = nn.Conv2d(64, 64, 3, 1, 0)
@@ -39,32 +40,43 @@ class ActorCriticModel(nn.Module):
         else:
             # Case: vector observation is available
             in_features_next_layer = observation_space.shape[0]
+        # todo 一个很大的疑问，它是怎么将样本作为序列化数据传入的处理的
         
         # Hidden layer
         self.lin_hidden = nn.Linear(in_features_next_layer, self.memory_layer_size)
         nn.init.orthogonal_(self.lin_hidden.weight, np.sqrt(2))
 
-        # Transformer Blocks
+        # Transformer Blocks 构建transformer 应该是encoder
         self.transformer = Transformer(config["transformer"], self.memory_layer_size, self.max_episode_length)
 
         # Decouple policy from value
-        # Hidden layer of the policy
+        # Hidden layer of the policy 这里应该是进一步将特征提取为策略的特征
         self.lin_policy = nn.Linear(self.memory_layer_size, self.hidden_size)
+        # orthogonal_ 是正交初始化，将矩阵初始化为一个正交矩阵
+        # 不会随便把向量拉爆
+        # 也不会轻易把向量压得很小
+        # 更像“旋转 / 反射 / 保持尺度”
+        # 跟 Xavier 最大的区别
+            # 每个元素独立随机采样
+            # 只控制整体方差范围
         nn.init.orthogonal_(self.lin_policy.weight, np.sqrt(2))
 
-        # Hidden layer of the value function
+        # Hidden layer of the value function todo 这个层的作用是啥？
         self.lin_value = nn.Linear(self.memory_layer_size, self.hidden_size)
         nn.init.orthogonal_(self.lin_value.weight, np.sqrt(2))
 
         # Outputs / Model heads
         # Policy (Multi-discrete categorical distribution)
+        # 动作策略的预测分支，每个分支预测一组动作
+        # todo 怎么使用
         self.policy_branches = nn.ModuleList()
+        # 看起来还涉及到多组组合动作
         for num_actions in action_space_shape:
             actor_branch = nn.Linear(in_features=self.hidden_size, out_features=num_actions)
             nn.init.orthogonal_(actor_branch.weight, np.sqrt(0.01))
             self.policy_branches.append(actor_branch)
             
-        # Value function
+        # Value function 价值预测网络
         self.value = nn.Linear(self.hidden_size, 1)
         nn.init.orthogonal_(self.value.weight, 1)
 

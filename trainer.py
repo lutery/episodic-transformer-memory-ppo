@@ -30,7 +30,7 @@ class PPOTrainer:
         self.lr_schedule = config["learning_rate_schedule"] # 学习率调度
         self.beta_schedule = config["beta_schedule"] # beta调度 todo 用处
         self.cr_schedule = config["clip_range_schedule"] # 剪切范围调度 todo 用处
-        self.memory_length = config["transformer"]["memory_length"] # 记忆长度 
+        self.memory_length = config["transformer"]["memory_length"] # 记忆长度，也就是模型一次性处理的序列长度
         self.num_blocks = config["transformer"]["num_blocks"] # transformer块数量
         self.embed_dim = config["transformer"]["embed_dim"] # 嵌入维度
 
@@ -41,29 +41,34 @@ class PPOTrainer:
         self.writer = SummaryWriter("./summaries/" + run_id + timestamp)
 
         # Init dummy environment to retrieve action space, observation space and max episode length
+        # 在这里创建环境
         print("Step 1: Init dummy environment")
         dummy_env = create_env(self.config["environment"])
-        observation_space = dummy_env.observation_space
-        self.action_space_shape = (dummy_env.action_space.n,)
-        self.max_episode_length = dummy_env.max_episode_steps
-        dummy_env.close()
+        observation_space = dummy_env.observation_space # 观察空间的obs 信息
+        self.action_space_shape = (dummy_env.action_space.n,) # 离散动作的数量
+        self.max_episode_length = dummy_env.max_episode_steps # 游戏的运行最大步数
+        dummy_env.close() # 看来这里仅仅只是创建游戏来获取一些信息
 
-        # Init buffer
+        # Init buffer 构建缓冲区
         print("Step 2: Init buffer")
         self.buffer = Buffer(self.config, observation_space, self.action_space_shape, self.max_episode_length, self.device)
 
-        # Init model
+        # Init model 构建模型，内部包含动作策略模型和价值预测模型
         print("Step 3: Init model and optimizer")
         self.model = ActorCriticModel(self.config, observation_space, self.action_space_shape, self.max_episode_length).to(self.device)
         self.model.train()
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr_schedule["initial"])
 
-        # Init workers
+        # Init workers 构建环境工作线程
+        # 多进程异步操作
         print("Step 4: Init environment workers")
         self.workers = [Worker(self.config["environment"]) for w in range(self.num_workers)]
+        # 为每个环境创建id
         self.worker_ids = range(self.num_workers)
+        # todo 看起来存储每个work进行步数
         self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long)
         # Reset workers (i.e. environments)
+        # 初始化环境并获取第一帧观察
         print("Step 5: Reset workers")
         for worker in self.workers:
             worker.child.send(("reset", None))
@@ -73,8 +78,10 @@ class PPOTrainer:
             self.obs[w] = worker.child.recv()
 
         # Setup placeholders for each worker's current episodic memory
+        # todo 这个是做啥的？
         self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
         # Generate episodic memory mask used in attention
+        # 构建一个最大记忆长度的下三角矩阵
         self.memory_mask = torch.tril(torch.ones((self.memory_length, self.memory_length)), diagonal=-1)
         """ e.g. memory mask tensor looks like this if memory_length = 6
         0, 0, 0, 0, 0, 0
@@ -84,7 +91,8 @@ class PPOTrainer:
         1, 1, 1, 1, 0, 0
         1, 1, 1, 1, 1, 0
         """         
-        # Setup memory window indices to support a sliding window over the episodic memory
+        # Setup memory window indices to support a sliding window over the episodic memory 提前构造好“每个时间步应该取哪一段 memory window”的索引表。
+        # 具体看markdown
         repetitions = torch.repeat_interleave(torch.arange(0, self.memory_length).unsqueeze(0), self.memory_length - 1, dim = 0).long()
         self.memory_indices = torch.stack([torch.arange(i, i + self.memory_length) for i in range(self.max_episode_length - self.memory_length + 1)]).long()
         self.memory_indices = torch.cat((repetitions, self.memory_indices))

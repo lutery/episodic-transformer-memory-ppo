@@ -7,37 +7,40 @@ class Buffer():
     """The buffer stores and prepares the training data. It supports transformer-based memory policies. """
     def __init__(self, config:dict, observation_space:spaces.Box, action_space_shape:tuple, max_episode_length:int, device:torch.device) -> None:
         """
+        这里应该是游戏数据的缓存
         Arguments:
-            config {dict} -- Configuration and hyperparameters of the environment, trainer and model.
-            observation_space {spaces.Box} -- The observation space of the agent
-            action_space_shape {tuple} -- Shape of the action space
-            max_episode_length {int} -- The maximum number of steps in an episode
-            device {torch.device} -- The device that will be used for training
+            config {dict} -- Configuration and hyperparameters of the environment, trainer and model. 训练模型的一些超参数配置
+            observation_space {spaces.Box} -- The observation space of the agent 观察空间的维度信息
+            action_space_shape {tuple} -- Shape of the action space 动作的shape信息，不过在本代码中都是离散动作
+            max_episode_length {int} -- The maximum number of steps in an episode 一轮游戏的最大步数
+            device {torch.device} -- The device that will be used for training 
         """
         # Setup members
         self.device = device
-        self.n_workers = config["n_workers"]
-        self.worker_steps = config["worker_steps"]
-        self.n_mini_batches = config["n_mini_batch"]
-        self.batch_size = self.n_workers * self.worker_steps
-        self.mini_batch_size = self.batch_size // self.n_mini_batches
-        self.max_episode_length = max_episode_length
-        self.memory_length = config["transformer"]["memory_length"]
-        self.num_blocks = config["transformer"]["num_blocks"]
-        self.embed_dim = config["transformer"]["embed_dim"]
+        self.n_workers = config["n_workers"] # 这里的作用就是同时存储多少个环境的采集数据
+        self.worker_steps = config["worker_steps"] # 每个worker的步数 todo
+        self.n_mini_batches = config["n_mini_batch"] # 小批量数量 todo
+        self.batch_size = self.n_workers * self.worker_steps # 批量大小
+        self.mini_batch_size = self.batch_size // self.n_mini_batches # 小批量大小
+        self.max_episode_length = max_episode_length # 最大回合长度
+        self.memory_length = config["transformer"]["memory_length"] # 记忆长度
+        self.num_blocks = config["transformer"]["num_blocks"] # transformer块数量
+        self.embed_dim = config["transformer"]["embed_dim"] # 嵌入维度
 
         # Initialize the buffer's data storage
+        # 这里是采集数据的存储区域，第一个维度就是存储并列的环境数，第二个维度就是存储对应的数据
         self.rewards = np.zeros((self.n_workers, self.worker_steps), dtype=np.float32)
         self.actions = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)), dtype=torch.long)
         self.dones = np.zeros((self.n_workers, self.worker_steps), dtype=np.bool)
         self.obs = torch.zeros((self.n_workers, self.worker_steps) + observation_space.shape)
-        self.log_probs = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)))
-        self.values = torch.zeros((self.n_workers, self.worker_steps))
-        self.advantages = torch.zeros((self.n_workers, self.worker_steps))
+        self.log_probs = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape))) # 每个动作的概率的log值
+        self.values = torch.zeros((self.n_workers, self.worker_steps)) # 状态值函数
+        self.advantages = torch.zeros((self.n_workers, self.worker_steps)) # 优势函数
         # Episodic memory index buffer
         # Whole episode memories
         # The length of memories is equal to the number of sampled episodes during training data sampling
         # Each element is of shape (max_episode_length, num_blocks, embed_dim)
+        # 以下几个是什么？
         self.memories = []
         # Memory mask used during attention
         self.memory_mask = torch.zeros((self.n_workers, self.worker_steps, self.memory_length), dtype=torch.bool)

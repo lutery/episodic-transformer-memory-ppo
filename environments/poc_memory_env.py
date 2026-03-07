@@ -17,6 +17,18 @@ class PocMemoryEnv():
     The last value of the agent's observation is its current position inside the environment.
     Optionally and to increase the difficulty of the task, the agent's position can be frozen until the goal information is hidden.
     To further challenge the agent, the step_size can be decreased.
+
+    概念验证：记忆环境
+
+    此环境旨在评估底层循环策略是否有效。
+
+    该环境基于一个一维网格，智能体可以在其中向左或向右移动。网格两端会生成一个目标，该目标可能产生惩罚或奖励。
+
+    在最开始的两步中，智能体会获知哪个目标会导致正奖励，哪个会导致负奖励。之后，此信息将从智能体的观测中隐藏。
+
+    智能体观测的最后一个值是其当前在环境中的位置。
+
+    为了增加任务难度，可以冻结智能体的位置，直到目标信息被隐藏。为了进一步挑战智能体，可以减小其步长。
     """
     def __init__(self, step_size:float=0.2, glob:bool=False, freeze:bool=False, max_episode_steps:int=-1):
         """
