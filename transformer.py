@@ -35,10 +35,9 @@ class MultiHeadAttention(nn.Module):
         The forward pass of the multi head attention layer.
         
         Arguments:
-        # 这里虽然有三个参数valule、keys、queris，但是实际上应该还是相同的值拷贝了3份
-            values {torch.tensor} -- Value in shape of (N, L, D)
-            keys {torch.tensor} -- Keys in shape of (N, L, D)
-            queries {torch.tensor} -- Queries in shape of (N, L, D)
+            values {torch.tensor} -- Value in shape of (N, L, D) L = memory length 历史记忆的长度
+            keys {torch.tensor} -- Keys in shape of (N, L, D) L = memory length 历史记忆的长度
+            queries {torch.tensor} -- Queries in shape of (N, 1, D) 当前时间步的特征
             mask {torch.tensor} -- Attention mask in shape of (N, L) 掩码矩阵，用来屏蔽掉不需要关注的部分，比如未来信息
             
         Returns:
@@ -121,7 +120,7 @@ class TransformerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         if self.layer_norm == "pre":
-            # todo 这个pre层的作用是啥？还要提前再归一化一次
+            # 这里的归一化是在输入的时候进行一次归一化
             self.norm_kv = nn.LayerNorm(embed_dim)
 
         # Feed forward projection 再次提取特征
@@ -130,15 +129,16 @@ class TransformerBlock(nn.Module):
     def forward(self, value, key, query, mask):
         """
         Arguments:
-            values {torch.tensor} -- Value in shape of (N, L, D)
-            keys {torch.tensor} -- Keys in shape of (N, L, D)
-            query {torch.tensor} -- Queries in shape of (N, L, D)
+            values {torch.tensor} -- Value in shape of (N, L, D) L = memory length 历史记忆的长度
+            keys {torch.tensor} -- Keys in shape of (N, L, D) L = memory length 历史记忆的长度
+            query {torch.tensor} -- Queries in shape of (N, L, D) 在本例中 L = 1
             mask {torch.tensor} -- Attention mask in shape of (N, L)
         Returns:
             torch.tensor -- Output
             torch.tensor -- Attention weights
         """
         # Apply pre-layer norm across the attention input
+        # 对输入做归一化
         if self.layer_norm == "pre":
             query_ = self.norm1(query)
             value = self.norm_kv(value)
@@ -148,10 +148,14 @@ class TransformerBlock(nn.Module):
 
         # Forward MultiHeadAttention
         attention, attention_weights = self.attention(value, key, query_, mask)
+        # attention shape is (N, query_len, embed_dim)
+        # attentin_weights shape is (N, heads, query_len, key_len)
 
         # GRU Gate or skip connection
+        # 用“可学习门控的残差连接”替代普通的直接相加残差。个项目里 GTrXL 的关键改动
         if self.use_gtrxl:
-            # Forward GRU gating
+            # Forward GRU gating 当前表示要不要吸收这次 attention 读回来的内容？吸收多少？
+            # 因为 memory 读回来的信息不一定总是有用。
             h = self.gate1(query, attention)
         else:
             # Skip connection
@@ -172,7 +176,7 @@ class TransformerBlock(nn.Module):
 
         # GRU Gate or skip connection
         if self.use_gtrxl:
-            # Forward GRU gating
+            # Forward GRU gating FFN 的新变换要不要强烈覆盖当前状态？还是保守一点？
             out = self.gate2(h, forward)
         else:
             # Skip connection
@@ -242,40 +246,68 @@ class Transformer(nn.Module):
     def forward(self, h, memories, mask, memory_indices):
         """
         Arguments:
-            h {torch.tensor} -- Input (query)
-            memories {torch.tesnor} -- Whole episoded memories of shape (N, L, num blocks, D)
-            mask {torch.tensor} -- Attention mask (dtype: bool) of shape (N, L)
-            memory_indices {torch.tensor} -- Memory window indices (dtype: long) of shape (N, L)
+            h {torch.tensor} -- Input (query) 当前的观察
+            memories {torch.tesnor} -- Whole episoded memories of shape (N, L, num blocks, D) todo 历史记忆
+            mask {torch.tensor} -- Attention mask (dtype: bool) of shape (N, L) todo 观察掩码，可能是用于最开始的几步时候看不到未来
+            memory_indices {torch.tensor} -- Memory window indices (dtype: long) of shape (N, L) todo 这个应该是序列的位置索引，用来说明当前应该是哪个时间步的位置
         Returns:
             {torch.tensor} -- Output of the entire transformer encoder
             {torch.tensor} -- Out memories (i.e. inputs to the transformer blocks)
         """
-        # Feed embedding layer and activate
+        # Feed embedding layer and activate 将输入的当前观察转换为嵌入的维度
         h = self.activation(self.linear_embedding(h))
 
         # Add positional encoding to every transformer block input
+        # 根据不同的位置编码
+        # 为什么没给h添加位置编码看md
         if self.config["positional_encoding"] == "relative":
             pos_embedding = self.pos_embedding(self.max_episode_steps)[memory_indices]
-            memories = memories + pos_embedding.unsqueeze(2)
+            memories = memories + pos_embedding.unsqueeze(2) # 将位置编码和记忆结合在一起，感觉这里每次都增加是因为相对位置会随着观察的位置而不同
             # memories[:,:,0] = memories[:,:,0] + pos_embedding # add positional encoding only to first layer?
         elif self.config["positional_encoding"] == "learned":
-            memories = memories + self.pos_embedding[memory_indices].unsqueeze(2)
+            memories = memories + self.pos_embedding[memory_indices].unsqueeze(2) # 可学习的位置编码就没这么多事情了，直接增加进去
             # memories[:,:,0] = memories[:,:,0] + self.pos_embedding[memory_indices] # add positional encoding only to first layer?
 
         # Forward transformer blocks
-        out_memories = []
+        out_memories = [] # 这里存储的是每一层输入的最新的记忆
+        # 遍历每一个block
+        # h shape is (N, D)
+        # 在memories中这里保存的 memory 不是一份，而是“每个 block 各存一份”。
+        # 看来这里是手动保存每一层的历史记忆
+        # 最终预测输出 h
         for i, block in enumerate(self.transformer_blocks):
-            out_memories.append(h.detach())
+            # 每层 block 的输入表示，作为这一层未来时间步可访问的 memory
+            '''
+            把当前 h 存进 memory 时切断计算图。
+
+            这样未来时间步使用这些 memory 时，不会把梯度反向传回整个历史 episode。
+
+            这是必要的，因为这里不是做完整 BPTT，而是把 episodic memory 当作一种缓存机制。
+
+            否则：
+
+            显存会爆
+            计算图会跨很多时间步越来越大
+
+            '''
+            out_memories.append(h.detach()) # 这里用detach时保证存储起来的tensor时没有梯度的，避免将反向传播梯度影响到缓冲区
+            # memories[:, :, i] shape is (N, L, D)
             h, attention_weights = block(memories[:, :, i], memories[:, :, i], h.unsqueeze(1), mask) # args: value, key, query, mask
             h = h.squeeze()
             if len(h.shape) == 1:
                 h = h.unsqueeze(0)
+        # 
+        # torch.stack(out_memories, dim=1)：(N, num_blocks, D)
         return h, torch.stack(out_memories, dim=1)
     
 class GRUGate(nn.Module):
     """
     Overview:
     这里是GTrXL的关键代码 todo
+    一个门控单元决定：
+
+    保留多少旧信息
+    接收多少新信息
         GRU Gating Unit used in GTrXL.
         Inspired by https://github.com/dhruvramani/Transformers-RL/blob/master/layers.py
     """
@@ -308,14 +340,47 @@ class GRUGate(nn.Module):
         nn.init.xavier_uniform_(self.Ug.weight)
 
     def forward(self, x: torch.Tensor, y: torch.Tensor):
-        """        
+        """       
+        两个待残差连接的张量 
         Arguments:
             x {torch.tensor} -- First input
             y {torch.tensor} -- Second input
         Returns:
             {torch.tensor} -- Output
+
+            果 bg 比较大，那么一开始：
+
+        Wz(y) + Uz(x) - bg 会偏小
+        sigmoid(...) 会更小
+        z 更接近 0
+        这会导致输出更接近：
+
+        (
+        1
+        −
+        z
+        )
+        ⊙
+        x
+        +
+        z
+        ⊙
+        h
+        ≈
+        x
+        (1−z)⊙x+z⊙h≈x
+        也就是：
+
+        初始时更像 identity mapping。
+
+        直观理解：
+
+        一开始先少改动当前表示，别太依赖 attention / FFN；等训练稳定后，再逐渐学会打开门。
         """
-        r = self.sigmoid(self.Wr(y) + self.Ur(x))
-        z = self.sigmoid(self.Wz(y) + self.Uz(x) - self.bg)
-        h = self.tanh(self.Wg(y) + self.Ug(torch.mul(r, x)))
+        # x shape is (N, query_len, embed_dim) 旧信息
+        # y shape is (N, query_len, embed_dim) 新信息
+        # 具体看markdown
+        r = self.sigmoid(self.Wr(y) + self.Ur(x)) # r shape is (N, query_len, embed_dim) 重置门，在生成候选状态时，旧信息 x 有多少要被带进去
+        z = self.sigmoid(self.Wz(y) + self.Uz(x) - self.bg) # z shape is (N, query_len, embed_dim) 更新门，决定多少新信息被引入，决定最终输出里：多少用旧信息 x、多少用新候选 h
+        h = self.tanh(self.Wg(y) + self.Ug(torch.mul(r, x))) # torch.mul(r, x)) shape is (N, query_len, embed_dim), h shape is (N, query_len, embed_dim) 候选状态，这是在构造一个“如果我要更新，那我更新成什么”的候选结果。
         return torch.mul(1 - z, x) + torch.mul(z, h)

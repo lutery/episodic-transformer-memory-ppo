@@ -84,10 +84,10 @@ class ActorCriticModel(nn.Module):
         """Forward pass of the model
 
         Arguments:
-            obs {torch.tensor} -- Batch of observations
-            memory {torch.tensor} -- Episodic memory window
-            memory_mask {torch.tensor} -- Mask to prevent the model from attending to the padding
-            memory_indices {torch.tensor} -- Indices to select the positional encoding that matches the memory window
+            obs {torch.tensor} -- Batch of observations todo 当前的观察
+            memory {torch.tensor} -- Episodic memory window todo 历史记忆
+            memory_mask {torch.tensor} -- Mask to prevent the model from attending to the padding todo 观察掩码，可能是用于最开始的几步时候看不到未来
+            memory_indices {torch.tensor} -- Indices to select the positional encoding that matches the memory window todo 这个是干啥的
 
         Returns:
             {Categorical} -- Policy: Categorical distribution
@@ -95,7 +95,7 @@ class ActorCriticModel(nn.Module):
         """
         # Set observation as input to the model
         h = obs
-        # Forward observation encoder
+        # Forward observation encoder 提取图片观察的特征后，展平为一维的特征
         if len(self.observation_space_shape) > 1:
             batch_size = h.size()[0]
             # Propagate input through the visual encoder
@@ -105,22 +105,26 @@ class ActorCriticModel(nn.Module):
             # Flatten the output of the convolutional layers
             h = h.reshape((batch_size, -1))
 
-        # Feed hidden layer
+        # Feed hidden layer 将特征的维度转换为记忆层的维度
         h = F.relu(self.lin_hidden(h))
         
         # Forward transformer blocks
+        # 将特征输入到transformer块中，更新记忆，提取特征
+        # h输出最新的记忆特征， memeory保存每一transformer层输入的记忆，用于后续存储到历史记忆中
         h, memory = self.transformer(h, memory, memory_mask, memory_indices)
 
         # Decouple policy from value
+        # 下面就是对最新的特征h进行预测动作策略、状态价值
         # Feed hidden layer (policy)
         h_policy = F.relu(self.lin_policy(h))
         # Feed hidden layer (value function)
         h_value = F.relu(self.lin_value(h))
-        # Head: Value function
+        # Head: Value function 预测价值
         value = self.value(h_value).reshape(-1)
-        # Head: Policy
+        # Head: Policy 对每一个动作策略分支预测动作概率分布
         pi = [Categorical(logits=branch(h_policy)) for branch in self.policy_branches]
         
+        # 返回动作策略、状态价值以及最新的记忆特征
         return pi, value, memory
 
     def get_conv_output(self, shape:tuple) -> int:

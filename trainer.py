@@ -109,17 +109,22 @@ class PPOTrainer:
     def run_training(self) -> None:
         """Runs the entire training logic from sampling data to optimizing the model. Only the final model is saved."""
         # 这里是训练的主流程代码
+        # 本函数就是开启正式训练
         print("Step 6: Starting training using " + str(self.device))
         # Store episode results for monitoring statistics
-        episode_infos = deque(maxlen=100)
+        episode_infos = deque(maxlen=100) # 看起来是仅存储近100轮游戏
 
+        # 这个参数应该是训练几轮
         for update in range(self.config["updates"]):
             # Decay hyperparameters polynomially based on the provided config
+            # 根据训练的轮数获取当前的学习率、beta、裁剪范围等
+            # todo 适配的时候在看逻辑
             learning_rate = polynomial_decay(self.lr_schedule["initial"], self.lr_schedule["final"], self.lr_schedule["max_decay_steps"], self.lr_schedule["power"], update)
             beta = polynomial_decay(self.beta_schedule["initial"], self.beta_schedule["final"], self.beta_schedule["max_decay_steps"], self.beta_schedule["power"], update)
             clip_range = polynomial_decay(self.cr_schedule["initial"], self.cr_schedule["final"], self.cr_schedule["max_decay_steps"], self.cr_schedule["power"], update)
 
             # Sample training data
+            # todo 后续看这里
             sampled_episode_info = self._sample_training_data()
 
             # Prepare the sampled data inside the buffer (splits data into sequences)
@@ -160,7 +165,10 @@ class PPOTrainer:
         episode_infos = []
         
         # Init episodic memory buffer using each workers' current episodic memory
+        # todo 这是在干啥
+        # 只能看出为每个采集work单独设立缓冲区
         self.buffer.memories = [self.memory[w] for w in range(self.num_workers)]
+        # 这里应该是为每一个buffer设置workid
         for w in range(self.num_workers):
             self.buffer.memory_index[w] = w
 
@@ -247,18 +255,22 @@ class PPOTrainer:
 
     def _train_epochs(self, learning_rate:float, clip_range:float, beta:float) -> list:
         """Trains several PPO epochs over one batch of data while dividing the batch into mini batches.
+        采用PPO算法训练模型
         
         Arguments:
-            learning_rate {float} -- The current learning rate
-            clip_range {float} -- The current clip range
-            beta {float} -- The current entropy bonus coefficient
+            learning_rate {float} -- The current learning rate 学习率
+            clip_range {float} -- The current clip range 裁剪范围
+            beta {float} -- The current entropy bonus coefficient beta值
             
         Returns:
             {tuple} -- Training and gradient statistics of one training epoch"""
+        # grad_info 存储每次训练后的梯度变化信息
         train_info, grad_info = [], {}
         for _ in range(self.config["epochs"]):
+            # 这里就是PPO提取每一次训练的batch
             mini_batch_generator = self.buffer.mini_batch_generator()
             for mini_batch in mini_batch_generator:
+                # 又封装了一层进行小batch训练
                 train_info.append(self._train_mini_batch(mini_batch, learning_rate, clip_range, beta))
                 for key, value in self.model.get_grad_norm().items():
                     grad_info.setdefault(key, []).append(value)
@@ -277,9 +289,15 @@ class PPOTrainer:
             {list} -- list of trainig statistics (e.g. loss)
         """
         # Select episodic memory windows
+        # todo 搞清楚samples中每一个的来源 samples["memories"]是啥？
+        # samples["memories"]：这条样本所属 episode 的完整 memory 张量，(B, max_episode_length, num_blocks, embed_dim)
+        # samples["memory_indices"]：每条样本应该取哪几个时间位置的索引窗口，(B, memory_length)，例如某条样本可能是：[12, 13, 14, 15]，表示这条样本在训练时要查看 episode memory 中第 12 到 15 号位置
+        # batched_index_select(..., 1, ...) 这里是在第 1 维做 batched gather。对 batch 里的每一条样本，都用它自己的 memory_indices，从自己的完整 episode memory 中取出对应的时间窗口。
+        #   最终得到的 memory shape 大致是：(B, memory_length, num_blocks, embed_dim) 这个结果才是后面真正喂给模型的记忆窗口
         memory = batched_index_select(samples["memories"], 1, samples["memory_indices"])
         
         # Forward model
+        # todo 查清楚最新的记忆是如何添加到缓冲区的
         policy, value, _ = self.model(samples["obs"], memory, samples["memory_mask"], samples["memory_indices"])
 
         # Retrieve and process log_probs from each policy branch
