@@ -65,7 +65,7 @@ class PPOTrainer:
         self.workers = [Worker(self.config["environment"]) for w in range(self.num_workers)]
         # 为每个环境创建id
         self.worker_ids = range(self.num_workers)
-        # todo 看起来存储每个work进行步数
+        # todo 看起来存储每个work进行步数 shape 是（num_workers，）每个元素表示对应worker当前的步数，每当worker完成一个episode时就重置为0
         self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long)
         # Reset workers (i.e. environments)
         # 初始化环境并获取第一帧观察
@@ -78,7 +78,7 @@ class PPOTrainer:
             self.obs[w] = worker.child.recv()
 
         # Setup placeholders for each worker's current episodic memory
-        # todo 这个是做啥的？
+        # 这里的memeory存储的是transformer中每个时间步的历史记忆项，用来和后续的最新观察组合预测最新的策略、价值
         self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
         # Generate episodic memory mask used in attention
         # 构建一个最大记忆长度的下三角矩阵
@@ -118,7 +118,6 @@ class PPOTrainer:
         for update in range(self.config["updates"]):
             # Decay hyperparameters polynomially based on the provided config
             # 根据训练的轮数获取当前的学习率、beta、裁剪范围等
-            # todo 适配的时候在看逻辑
             learning_rate = polynomial_decay(self.lr_schedule["initial"], self.lr_schedule["final"], self.lr_schedule["max_decay_steps"], self.lr_schedule["power"], update)
             beta = polynomial_decay(self.beta_schedule["initial"], self.beta_schedule["final"], self.beta_schedule["max_decay_steps"], self.beta_schedule["power"], update)
             clip_range = polynomial_decay(self.cr_schedule["initial"], self.cr_schedule["final"], self.cr_schedule["max_decay_steps"], self.cr_schedule["power"], update)
@@ -161,11 +160,12 @@ class PPOTrainer:
 
     def _sample_training_data(self) -> list:
         """Runs all n workers for n steps to sample training data.
+        从所有的子线程采集训练数据
 
         Returns:
             {list} -- list of results of completed episodes.
         """
-        episode_infos = []
+        episode_infos = [] # 不区分是哪个work直接存储每次游戏结束时的info
         
         # Init episodic memory buffer using each workers' current episodic memory
         # todo 这是在干啥
@@ -176,45 +176,52 @@ class PPOTrainer:
             self.buffer.memory_index[w] = w
 
         # Sample actions from the model and collect experiences for optimization
-        for t in range(self.config["worker_steps"]):
+        for t in range(self.config["worker_steps"]): # 在每次训练前，最多执行多少次数据采集
             # Gradients can be omitted for sampling training data
             with torch.no_grad():
-                # Store the initial observations inside the buffer
-                self.buffer.obs[:, t] = torch.tensor(self.obs)
+                # Store the initial observations inside the buffer 存储每步的观察
+                self.buffer.obs[:, t] = torch.tensor(self.obs) 
                 # Store mask and memory indices inside the buffer
+                # torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)： 限制每个步数不能超过model的记忆长度，超过了就一直取最后一个位置的记忆窗口
+                # 从memory_mask中提取对应步数的记忆掩码，存储在buffer中，确认当前能看到的范围
                 self.buffer.memory_mask[:, t] = self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)]
+                # 从memory_indices中提取对应步数的记忆索引，存储在buffer中，即在当前步中应该查看episode memory中的哪几个位置
                 self.buffer.memory_indices[:, t] = self.memory_indices[self.worker_current_episode_step]
-                # Retrieve the memory window from the entire episodic memory
+                # Retrieve the memory window from the entire episodic memory 根据索引提取对应的记忆
                 sliced_memory = batched_index_select(self.memory, 1, self.buffer.memory_indices[:,t])
                 # Forward the model to retrieve the policy, the states' value and the new memory item
+                # 将当前观察，历史记忆，记忆的掩码，记忆的索引输入模型，获取动作策略、状态值函数、以及新的记忆项
+                # 这里传入self.buffer.memory_indices是为了在位置编码时获取对应位置的位置编码
                 policy, value, memory = self.model(torch.tensor(self.obs), sliced_memory, self.buffer.memory_mask[:, t],
                                                    self.buffer.memory_indices[:,t])
                 
-                # Add new memory item to the episodic memory
+                # Add new memory item to the episodic memory 讲新的记忆项添加到历史记忆中
                 self.memory[self.worker_ids, self.worker_current_episode_step] = memory
 
                 # Sample actions from each individual policy branch
                 actions = []
                 log_probs = []
-                for action_branch in policy:
-                    action = action_branch.sample()
+                for action_branch in policy: # 对每一个动作分支进行遍历
+                    action = action_branch.sample() # 采样动作
                     actions.append(action)
-                    log_probs.append(action_branch.log_prob(action))
-                # Write actions, log_probs and values to buffer
+                    log_probs.append(action_branch.log_prob(action)) # 动作对应的对数概率
+                # Write actions, log_probs and values to buffer 存储预测的动作、动作的对数概率、状态价值
                 self.buffer.actions[:, t] = torch.stack(actions, dim=1)
                 self.buffer.log_probs[:, t] = torch.stack(log_probs, dim=1)
                 self.buffer.values[:, t] = value
 
-            # Send actions to the environments
+            # Send actions to the environments 将动作发送到环境中执行
             for w, worker in enumerate(self.workers):
                 worker.child.send(("step", self.buffer.actions[w, t].cpu().numpy()))
 
             # Retrieve step results from the environments
+            # 接收执行的结果
             for w, worker in enumerate(self.workers):
                 obs, self.buffer.rewards[w, t], self.buffer.dones[w, t], info = worker.child.recv()
                 if info: # i.e. done
+                    # 看来这里是如果有info代表游戏结束
                     # Reset the worker's current timestep
-                    self.worker_current_episode_step[w] = 0
+                    self.worker_current_episode_step[w] = 0 # 将对应work的当前步数设置为0
                     # Store the information of the completed episode (e.g. total reward, episode length)
                     episode_infos.append(info)
                     # Reset the agent (potential interface for providing reset parameters)
@@ -222,7 +229,7 @@ class PPOTrainer:
                     # Get data from reset
                     obs = worker.child.recv()
                     # Break the reference to the worker's memory
-                    mem_index = self.buffer.memory_index[w, t]
+                    mem_index = self.buffer.memory_index[w, t] # todo
                     self.buffer.memories[mem_index] = self.buffer.memories[mem_index].clone()
                     # Reset episodic memory
                     self.memory[w] = torch.zeros((self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
@@ -233,12 +240,12 @@ class PPOTrainer:
                         self.buffer.memory_index[w, t + 1:] = len(self.buffer.memories) - 1
                 else:
                     # Increment worker timestep
-                    self.worker_current_episode_step[w] +=1
+                    self.worker_current_episode_step[w] +=1 # 更新每个work当前的步数
                 # Store latest observations
-                self.obs[w] = obs
+                self.obs[w] = obs # 这里是更新最新的obs
                             
         # Compute the last value of the current observation and memory window to compute GAE
-        last_value = self.get_last_value()
+        last_value = self.get_last_value() # 这里应该是计算最后一步的价值
         # Compute advantages
         self.buffer.calc_advantages(last_value, self.config["gamma"], self.config["lamda"])
 

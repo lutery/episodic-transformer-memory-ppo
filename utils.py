@@ -37,14 +37,14 @@ def polynomial_decay(initial:float, final:float, max_decay_steps:int, power:floa
     """Decays hyperparameters polynomially. If power is set to 1.0, the decay behaves linearly. 
 
     Arguments:
-        initial {float} -- Initial hyperparameter such as the learning rate
-        final {float} -- Final hyperparameter such as the learning rate
-        max_decay_steps {int} -- The maximum numbers of steps to decay the hyperparameter
-        power {float} -- The strength of the polynomial decay
-        current_step {int} -- The current step of the training
+        initial {float} -- Initial hyperparameter such as the learning rate 初始值
+        final {float} -- Final hyperparameter such as the learning rate 最终值
+        max_decay_steps {int} -- The maximum numbers of steps to decay the hyperparameter 距离更新到最终值时的迭代次数
+        power {float} -- The strength of the polynomial decay (e.g. 1.0 for linear decay) 多项式衰减的强度，1.0表示线性衰减
+        current_step {int} -- The current step of the training 当前训练步数
 
     Returns:
-        {float} -- Decayed hyperparameter
+        {float} -- Decayed hyperparameter 衰减后的超参数
     """
     # Return the final value if max_decay_steps is reached or the initial and the final value are equal
     if current_step > max_decay_steps or initial == final:
@@ -65,17 +65,20 @@ def batched_index_select(input, dim, index):
     todo 在看具体的执行流程
 
     Arguments:
-        input {torch.tensor} -- Input tensor
-        dim {int} -- Dimension along which to select values
-        index {torch.tensor} -- Tensor containing the indices to select
+        input {torch.tensor} -- Input tensor 输入的tensor
+        dim {int} -- Dimension along which to select values 输入待索引的维度
+        index {torch.tensor} -- Tensor containing the indices to select 输入要提取的位置索引，每个 batch 样本自己的索引表。
+        具体看md文档
 
     Returns:
         {torch.tensor} -- Output tensor
     """
     for ii in range(1, len(input.shape)):
         if ii != dim:
+            # 这里是在给index增加维度，估计是为了后续能够索引对应的数据，gather应该是要让两者的维度相同
             index = index.unsqueeze(ii)
     expanse = list(input.shape)
+    # 以下三步是为了将index的维度扩展到和input一样，才能进行gather操作，但是保留batch维度和索引维度不变
     expanse[0] = -1
     expanse[dim] = -1
     index = index.expand(expanse)
