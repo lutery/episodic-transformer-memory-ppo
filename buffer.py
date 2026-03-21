@@ -54,6 +54,7 @@ class Buffer():
     def prepare_batch_dict(self) -> None:
         """Flattens the training samples and stores them inside a dictionary. Due to using a recurrent policy,
         the data is split into episodes or sequences beforehand.
+        这个函数主要是对已经采集的数据进行一些前期工作，比如展平和历史记忆组合
         """
         # Supply training samples
         samples = {
@@ -66,10 +67,12 @@ class Buffer():
             "memory_index": self.memory_index,
             "memory_indices": self.memory_indices,
         }
-        # Convert the memories to a tensor
+        # Convert the memories to a tensor 将所有的历史记忆转换为一个四维的张量，第一维是历史记忆的数量，第二维是最大回合长度，第三维是transformer块数量，第四维是嵌入维度
+        # 如果没有达到最大的回合数则会有一些历史记忆是全零的
         self.memories = torch.stack(self.memories, dim=0)
 
         # Flatten all samples and convert them to a tensor except memories and its memory mask
+        # 将sampels中的数据前两个维进行展平，变成一个批量的形式，方便后续的训练使用
         self.samples_flat = {}
         for key, value in samples.items():
             self.samples_flat[key] = value.reshape(value.shape[0] * value.shape[1], *value.shape[2:])
@@ -82,8 +85,8 @@ class Buffer():
             {dict} -- Mini batch data for training
         """
         # Prepare indices (shuffle)
-        indices = torch.randperm(self.batch_size)
-        mini_batch_size = self.batch_size // self.n_mini_batches
+        indices = torch.randperm(self.batch_size) # 打乱batch 中的数据顺序，生成一个随机的索引序列
+        mini_batch_size = self.batch_size // self.n_mini_batches # 计算每个mini batch的大小
         for start in range(0, self.batch_size, mini_batch_size):
             # Compose mini batches
             end = start + mini_batch_size
@@ -92,6 +95,7 @@ class Buffer():
             for key, value in self.samples_flat.items():
                 if key == "memory_index":
                     # Add the correct episode memories to the concerned mini batch
+                    # 根据当前的mini_batch_indices，从memory_index找到对应的记忆索引，这个记忆索引就是memories中对应的一个游戏周期的历史记忆的位置索引，根据这个索引找到对应的历史记忆，添加到mini_batch中
                     mini_batch["memories"] = self.memories[value[mini_batch_indices]]
                 else:
                     mini_batch[key] = value[mini_batch_indices].to(self.device)
