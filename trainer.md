@@ -888,3 +888,378 @@ memory[k] = samples["memories"][k, [2,3,4,5], :, :]
 - `embed_dim=8`
 
 把这句 `batched_index_select()` 的输入输出张量形状完整画出来。
+
+# 看我选中的代码，我标识的注释中的shape是否正确？如果不正确为什么不正确？
+你选中的这段注释里，`shape` 有一部分是**不正确的**，主要问题在于你把 `log_probs` 和 `entropies` 在“列表阶段”的维度理解成了最终张量维度，而且把维度顺序写反了。
+
+我直接按代码逐行校正。
+
+---
+
+## 先给结论
+
+你这几句里：
+
+```python
+# log_probs： 存储每一个动作的动作概率的对数值，shape 应该是（num_actions_branchs, B）
+# entropies： 存储每一个动作分支的熵值，shape 应该是（num_actions_branchs, B）
+```
+
+**这两句不准确。**
+
+更准确地说：
+
+1. 在 `append` 之前，`log_probs` 和 `entropies` 是 **Python list**，不是张量，严格说“shape”这个词还不适用
+2. 列表中的**每个元素** shape 是：
+   $$
+   (B,)
+   $$
+3. `torch.stack(..., dim=1)` 之后，才会变成：
+   $$
+   (B,\ num\_action\_branches)
+   $$
+   不是你写的：
+   $$
+   (num\_action\_branches,\ B)
+   $$
+
+---
+
+# 逐行看
+
+代码在 trainer.py。
+
+---
+
+## 1. `policy` 是什么
+
+前面一行：
+
+```python
+policy, value, _ = self.model(...)
+```
+
+在 model.py 中，`policy` 返回的是：
+
+```python
+pi = [Categorical(logits=branch(h_policy)) for branch in self.policy_branches]
+```
+
+所以 `policy` 是一个 **list**，里面每个元素都是一个 `Categorical` 分布对象。
+
+如果当前动作空间只有一个离散动作头，那么：
+
+- `len(policy) = 1`
+
+如果是 multi-discrete 动作空间，那么：
+
+- `len(policy) = num_action_branches`
+
+---
+
+## 2. `for i, policy_branch in enumerate(policy):`
+
+这一层循环是在遍历**每个动作分支**。
+
+所以这里的 `i` 不是 batch 维，而是：
+
+- 第 0 个动作分支
+- 第 1 个动作分支
+- 第 2 个动作分支
+- ...
+
+---
+
+## 3. `policy_branch.log_prob(samples["actions"][:, i])` 的 shape
+
+对一个 `Categorical` 分布来说：
+
+```python
+policy_branch.log_prob(actions)
+```
+
+如果 `actions` 的 shape 是：
+
+$$
+(B,)
+$$
+
+那么返回的 `log_prob` shape 也是：
+
+$$
+(B,)
+$$
+
+因为它是：
+
+**batch 中每个样本，在该动作分支上，对应动作的对数概率。**
+
+所以这里每次 `append` 进去的单个元素 shape 是：
+
+$$
+(B,)
+$$
+
+---
+
+## 4. `policy_branch.entropy()` 的 shape
+
+同理，`Categorical.entropy()` 返回的是：
+
+**batch 中每个样本该动作分布的熵**
+
+shape 也是：
+
+$$
+(B,)
+$$
+
+所以这里每次 append 进去的单个元素也是一维向量：
+
+$$
+(B,)
+$$
+
+---
+
+# 关键点：列表阶段没有“整体 shape”
+
+在这两行之后：
+
+```python
+log_probs.append(...)
+entropies.append(...)
+```
+
+此时：
+
+- `log_probs` 是 Python list
+- `entropies` 也是 Python list
+
+如果有 3 个动作分支，那它们看起来更像：
+
+```python
+log_probs = [
+    tensor(shape=(B,)),
+    tensor(shape=(B,)),
+    tensor(shape=(B,))
+]
+```
+
+所以更准确的说法应该是：
+
+- `log_probs` 是长度为 `num_action_branches` 的列表
+- 列表中每个元素 shape 是 `(B,)`
+
+而不是直接说它的 shape 是 `(num_action_branches, B)`。
+
+---
+
+# 5. `torch.stack(log_probs, dim=1)` 之后的 shape
+
+这一句很关键：
+
+```python
+log_probs = torch.stack(log_probs, dim=1)
+```
+
+假设有：
+
+- `num_action_branches = A`
+- 每个元素 shape 是 `(B,)`
+
+如果你 stack 在 `dim=1`，结果是：
+
+$$
+(B,\ A)
+$$
+
+不是：
+
+$$
+(A,\ B)
+$$
+
+---
+
+## 为什么是 `(B, A)` 不是 `(A, B)`
+
+因为原来每个元素是 `(B,)`，相当于一维张量。
+
+把多个 `(B,)` 的张量在 `dim=1` 上堆叠，插入的是第 2 个维度，所以结果是：
+
+```python
+(B, A)
+```
+
+举个例子：
+
+```python
+t1.shape = (5,)
+t2.shape = (5,)
+t3.shape = (5,)
+torch.stack([t1, t2, t3], dim=1).shape == (5, 3)
+```
+
+所以你的注释中：
+
+```python
+shape 应该是（num_actions_branchs, B）
+```
+
+是错的。
+
+正确是：
+
+```python
+(B, num_action_branches)
+```
+
+---
+
+# 6. `entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1)`
+
+这一句可以拆开看。
+
+---
+
+## 第一步：`torch.stack(entropies, dim=1)`
+
+和 `log_probs` 一样，stack 后 shape 是：
+
+$$
+(B,\ A)
+$$
+
+其中：
+- `B` = batch size
+- `A` = 动作分支数
+
+---
+
+## 第二步：`.sum(1)`
+
+沿着动作分支维度求和，也就是把每个样本所有动作分支的熵加起来：
+
+$$
+(B,\ A) \to (B,)
+$$
+
+---
+
+## 第三步：`.reshape(-1)`
+
+这里只是确保它是一维向量：
+
+$$
+(B,)
+$$
+
+所以最终：
+
+```python
+entropies.shape == (B,)
+```
+
+---
+
+# 7. 为什么这里要 `sum(1)`
+
+因为如果动作空间是 multi-discrete，那么总策略其实是多个独立分支分布组成的。
+
+这时一个样本的总 entropy，通常取各分支 entropy 的和：
+
+$$
+H(\pi) = \sum_i H(\pi_i)
+$$
+
+所以这里的：
+
+```python
+.sum(1)
+```
+
+是在把每个动作分支的 entropy 合成一个样本级别的 entropy。
+
+---
+
+# 8. 对照修正你的注释
+
+你原来的：
+
+```python
+# log_probs： 存储每一个动作的动作概率的对数值，shape 应该是（num_actions_branchs, B）
+# entropies： 存储每一个动作分支的熵值，shape 应该是（num_actions_branchs, B）
+```
+
+更准确应该改成：
+
+```python
+# log_probs, entropies 这里一开始都是 list，不是 tensor
+# list 长度 = num_action_branches
+# 每个元素的 shape = (B,)
+```
+
+然后：
+
+```python
+log_probs = torch.stack(log_probs, dim=1)
+```
+
+之后：
+
+```python
+# log_probs shape = (B, num_action_branches)
+```
+
+以及：
+
+```python
+entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1)
+```
+
+最终：
+
+```python
+# stack 后 shape = (B, num_action_branches)
+# sum(1) 后 shape = (B,)
+```
+
+---
+
+# 9. 当前这个项目里大多数时候为什么你不容易看出问题
+
+因为这个项目里很多环境动作空间是：
+
+```python
+self.action_space_shape = (dummy_env.action_space.n,)
+```
+
+也就是通常只有 **1 个动作分支**。
+
+这时：
+
+- `num_action_branches = 1`
+- `(B, 1)` 和 `(1, B)` 在很多直觉上容易混
+- 但本质上仍然不同
+
+所以注释里写错了，代码未必出错，只是因为当前多数场景动作分支数恰好是 1，不容易暴露。
+
+---
+
+# 10. 一句话总结
+
+你的 shape 注释**不完全正确**，主要错在：
+
+- `log_probs` / `entropies` 在 `stack` 前其实是列表，不宜直接说 shape
+- 每个元素 shape 是 `(B,)`
+- `torch.stack(..., dim=1)` 后的 shape 是：
+  $$
+  (B,\ num\_action\_branches)
+  $$
+  而不是：
+  $$
+  (num\_action\_branches,\ B)
+  $$
+
+如果你愿意，我可以继续帮你把这一段注释直接整理成一版“完全正确、适合学习用”的中文注释文本。

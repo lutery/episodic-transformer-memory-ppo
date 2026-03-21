@@ -28,8 +28,8 @@ class PPOTrainer:
         self.run_id = run_id # 本次训练的id
         self.num_workers = config["n_workers"] # 工作线程数量
         self.lr_schedule = config["learning_rate_schedule"] # 学习率调度
-        self.beta_schedule = config["beta_schedule"] # beta调度 todo 用处
-        self.cr_schedule = config["clip_range_schedule"] # 剪切范围调度 todo 用处
+        self.beta_schedule = config["beta_schedule"] # beta调度 用来控制动作熵在最终计算loss时的比例，在训练的初期这个值要比较大，因为要增加探索，在训练的后期要逐步缩小比例，逐渐确定动作
+        self.cr_schedule = config["clip_range_schedule"] # 剪切范围调度（主要针对动作策略以及价值策略），在本代码中主要是针对PPO算法中的剪切范围进行调度，初期可以设置较大范围，后期逐渐缩小范围，稳定训练过程，但是本代码中时没有变化，一个恒定值
         self.memory_length = config["transformer"]["memory_length"] # 记忆长度，也就是模型一次性处理的序列长度
         self.num_blocks = config["transformer"]["num_blocks"] # transformer块数量
         self.embed_dim = config["transformer"]["embed_dim"] # 嵌入维度
@@ -169,7 +169,8 @@ class PPOTrainer:
         episode_infos = [] # 不区分是哪个work直接存储每次游戏结束时的info
         
         # Init episodic memory buffer using each workers' current episodic memory
-        # todo 这是在干啥
+        # 这个事存储每个回合游戏的历史记忆的缓冲区，最终会存储到self.buffer.memories中，每个元素是一个三维张量，第一维是最大回合长度，第二维是transformer块数量，第三维是嵌入维度 ，不断的累积，直到buffer定义的最大长度或者游戏结束
+        # 后续通过memory_index这个索引表来找到对应的历史记忆进行训练，具体看markdown    
         # 只能看出为每个采集work单独设立缓冲区
         # 利用索引，经过之前构建的memory_indices表，来为每个work设置对应的memory window索引
         self.buffer.memories = [self.memory[w] for w in range(self.num_workers)]
@@ -306,7 +307,7 @@ class PPOTrainer:
             {list} -- list of trainig statistics (e.g. loss)
         """
         # Select episodic memory windows
-        # todo 搞清楚samples中每一个的来源 samples["memories"]是啥？
+        # 搞清楚samples中每一个的来源 samples["memories"]是啥？samples["memories"] 是存储每个游戏回合的每一步的历史记忆的缓冲区，用来结合历史记忆和当前观察进行训练，samples["memory_indices"] 是每条样本对应的历史记忆索引，用来从完整的历史记忆中提取对应的记忆窗口进行训练
         # samples["memories"]：这条样本所属 episode 的完整 memory 张量，(B, max_episode_length, num_blocks, embed_dim)
         # samples["memory_indices"]：每条样本应该取哪几个时间位置的索引窗口，(B, memory_length)，例如某条样本可能是：[12, 13, 14, 15]，表示这条样本在训练时要查看 episode memory 中第 12 到 15 号位置
         # batched_index_select(..., 1, ...) 这里是在第 1 维做 batched gather。对 batch 里的每一条样本，都用它自己的 memory_indices，从自己的完整 episode memory 中取出对应的时间窗口。
@@ -314,20 +315,21 @@ class PPOTrainer:
         memory = batched_index_select(samples["memories"], 1, samples["memory_indices"])
         
         # Forward model
-        # todo 查清楚最新的记忆是如何添加到缓冲区的
+        # 查清楚最新的记忆是如何添加到缓冲区的，最新记忆就是obs
         policy, value, _ = self.model(samples["obs"], memory, samples["memory_mask"], samples["memory_indices"])
 
         # Retrieve and process log_probs from each policy branch
-        # log_probs： 存储每一个动作的动作概率的对数值，shape 应该是（num_actions_branchs, B） todo 确认这边的shape是否有问题？为啥会算错
-        # entropies： 存储每一个动作分支的熵值，shape 应该是（num_actions_branchs, B） todo
+        # log_probs： 存储每一个动作的动作概率的对数值，shape 应该是（num_actions_branchs, B） 
+        # entropies： 存储每一个动作分支的熵值，shape 应该是（num_actions_branchs, B） 
         log_probs, entropies = [], []
         for i, policy_branch in enumerate(policy):
             # samples["actions"][:, i]: 遍历采集样本的每一个动作分支 todo 看看具体是如何采集保存的？还是不是每一个分支而是本身就要遍历每一个离散动作？
             # 或者每一个执行动作的log概率
             log_probs.append(policy_branch.log_prob(samples["actions"][:, i]))
             entropies.append(policy_branch.entropy())
-        log_probs = torch.stack(log_probs, dim=1) #
-        entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1)
+        # 看md文档，经过stack后就变成了
+        log_probs = torch.stack(log_probs, dim=1) # shape is （B, num_action_branches）
+        entropies = torch.stack(entropies, dim=1).sum(1).reshape(-1) # shape is （B，） 这里是将每个动作分支的熵值相加，得到总的熵值，鼓励整体动作的多样性
 
         # Compute policy surrogates to establish the policy loss
         normalized_advantage = (samples["advantages"] - samples["advantages"].mean()) / (samples["advantages"].std() + 1e-8) # 类似ppo的归一化优势 shape is （B，）

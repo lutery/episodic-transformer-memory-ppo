@@ -219,12 +219,13 @@ class Transformer(nn.Module):
         super().__init__()
         self.config = config
         self.num_blocks = config["num_blocks"] # 有几个Transformer Block
-        self.embed_dim = config["embed_dim"] # 嵌入层的维度
+        self.embed_dim = config["embed_dim"] # 嵌入层的维度，在本代码中等于 input_dim
         self.num_heads = config["num_heads"] # 注意力头的数量
         self.max_episode_steps = max_episode_steps # 游戏的最大步数
         self.activation = nn.ReLU()
 
-        # Input embedding layer todo 这个层是用来做什么的？对应Transformer中的哪一层
+        # Input embedding layer 这个层是用来做什么的？对应Transformer中的哪一层
+        # 对输入的特征进行进一步的特征提取，然后再送入transformer中
         self.linear_embedding = nn.Linear(input_dim, self.embed_dim)
         nn.init.orthogonal_(self.linear_embedding.weight, np.sqrt(2))
 
@@ -247,7 +248,7 @@ class Transformer(nn.Module):
         """
         Arguments:
             h {torch.tensor} -- Input (query) 当前的观察
-            memories {torch.tesnor} -- Whole episoded memories of shape (N, L, num blocks, D) todo 历史记忆
+            memories {torch.tesnor} -- Whole episoded memories of shape (N, L, num blocks, D) 历史记忆
             mask {torch.tensor} -- Attention mask (dtype: bool) of shape (N, L) todo 观察掩码，可能是用于最开始的几步时候看不到未来
             memory_indices {torch.tensor} -- Memory window indices (dtype: long) of shape (N, L) todo 这个应该是序列的位置索引，用来说明当前应该是哪个时间步的位置
         Returns:

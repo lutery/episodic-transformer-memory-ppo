@@ -19,7 +19,7 @@ class Buffer():
         self.device = device
         self.n_workers = config["n_workers"] # 这里的作用就是同时存储多少个环境的采集数据
         self.worker_steps = config["worker_steps"] # 每次采集的最大步数，也是每个小批量的步数，最终的批量大小是n_workers * worker_steps
-        self.n_mini_batches = config["n_mini_batch"] # 小批量数量 todo
+        self.n_mini_batches = config["n_mini_batch"] # 小批量数量 ，主要用于PPO训练中的小批次训练
         self.batch_size = self.n_workers * self.worker_steps # 批量大小
         self.mini_batch_size = self.batch_size // self.n_mini_batches # 小批量大小
         self.max_episode_length = max_episode_length # 最大回合长度

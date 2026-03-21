@@ -19,8 +19,8 @@ class ActorCriticModel(nn.Module):
         """
         super().__init__()
         self.hidden_size = config["hidden_layer_size"] # 隐藏层的维度
-        self.memory_layer_size = config["transformer"]["embed_dim"] # 记忆层的维度 todo 
-        self.observation_space_shape = observation_space.shape # 观察空间的shape todo 应该是用在输入尺寸上
+        self.memory_layer_size = config["transformer"]["embed_dim"] # 记忆层的维度，也是transformer块的输入输出维度
+        self.observation_space_shape = observation_space.shape # 观察空间的shape 应该是用在输入尺寸上，主要是用来判断输入的obs是图像还是向量
         self.max_episode_length = max_episode_length
 
         # Observation encoder 这里是针对不同的输入，比如图像和一维的数据
@@ -40,7 +40,9 @@ class ActorCriticModel(nn.Module):
         else:
             # Case: vector observation is available
             in_features_next_layer = observation_space.shape[0]
-        # todo 一个很大的疑问，它是怎么将样本作为序列化数据传入的处理的
+        # 一个很大的疑问，它是怎么将样本作为序列化数据传入的处理的
+        # 因为这里的处理仅仅只是针对当前的obs 状态，对于历史的状态则直接从forward中的memory的参数传入
+        # 然后将forward后的memory输出作为新的历史记忆存储到buffer中，供后续训练使用
         
         # Hidden layer
         self.lin_hidden = nn.Linear(in_features_next_layer, self.memory_layer_size)
@@ -61,14 +63,14 @@ class ActorCriticModel(nn.Module):
             # 只控制整体方差范围
         nn.init.orthogonal_(self.lin_policy.weight, np.sqrt(2))
 
-        # Hidden layer of the value function todo 这个层的作用是啥？
+        # Hidden layer of the value function 这个层的作用是啥？价值预测分支，用于在最后一步预测价值前进一步的特征提取
         self.lin_value = nn.Linear(self.memory_layer_size, self.hidden_size)
         nn.init.orthogonal_(self.lin_value.weight, np.sqrt(2))
 
         # Outputs / Model heads
         # Policy (Multi-discrete categorical distribution)
         # 动作策略的预测分支，每个分支预测一组动作
-        # todo 怎么使用
+        # 怎么使用，如果一个环境多个离散动作分支，则进行多个离散动作分支的预测
         self.policy_branches = nn.ModuleList()
         # 看起来还涉及到多组组合动作
         for num_actions in action_space_shape:
@@ -147,8 +149,8 @@ class ActorCriticModel(nn.Module):
         Returns:
             {dict} -- Dictionary of gradient norms grouped by layer name
         """
-        grads = {}
-        if len(self.observation_space_shape) > 1:
+        grads = {} # 分别计算每一个层级的梯度范数，方便后续监控和分析
+        if len(self.observation_space_shape) > 1: # 如果是图像状态，那么就会有这几个卷积的梯度
             grads["encoder"] = self._calc_grad_norm(self.conv1, self.conv2, self.conv3)  
             
         grads["linear_layer"] = self._calc_grad_norm(self.lin_hidden)
@@ -168,6 +170,8 @@ class ActorCriticModel(nn.Module):
     
     def _calc_grad_norm(self, *modules):
         """Computes the norm of the gradients of the given modules.
+        一个通用的获取输入的module的梯度范数的函数，主要是为了方便获取不同层的梯度范数，进行监控和分析
+        在这里计算的因为它会把所有元素综合起来看，而不是只看某一个值，所以更能反映整体的梯度情况，而不是某一个元素的情况
 
         Arguments:
             modules {list} -- List of modules to compute the norm of the gradients of.
@@ -178,5 +182,8 @@ class ActorCriticModel(nn.Module):
         grads = []
         for module in modules:
             for name, parameter in module.named_parameters():
+                # 把每个参数张量的梯度拉平成一维
+                # 
                 grads.append(parameter.grad.view(-1))
+        # 把所有参数梯度拼成一个超长向量，然后计算这个向量的范数，反映整体的梯度情况
         return torch.linalg.norm(torch.cat(grads)).item() if len(grads) > 0 else None
