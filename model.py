@@ -84,10 +84,10 @@ class ActorCriticModel(nn.Module):
         """Forward pass of the model
 
         Arguments:
-            obs {torch.tensor} -- Batch of observations todo 当前的观察
-            memory {torch.tensor} -- Episodic memory window todo 历史记忆
-            memory_mask {torch.tensor} -- Mask to prevent the model from attending to the padding todo 观察掩码，可能是用于最开始的几步时候看不到未来
-            memory_indices {torch.tensor} -- Indices to select the positional encoding that matches the memory window todo 这个是干啥的
+            obs {torch.tensor} -- Batch of observations 当前的观察
+            memory {torch.tensor} -- Episodic memory window 历史记忆，如果缺少的历史观察就用0填充
+            memory_mask {torch.tensor} -- Mask to prevent the model from attending to the padding 观察掩码，可能是用于最开始的几步时候看不到未来
+            memory_indices {torch.tensor} -- Indices to select the positional encoding that matches the memory window 表示在当前的步数下，能够看到的历史记忆的位置索引，可能是用于最开始的几步时候看不到未来
 
         Returns:
             {Categorical} -- Policy: Categorical distribution

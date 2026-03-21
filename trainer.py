@@ -65,7 +65,8 @@ class PPOTrainer:
         self.workers = [Worker(self.config["environment"]) for w in range(self.num_workers)]
         # 为每个环境创建id
         self.worker_ids = range(self.num_workers)
-        # todo 看起来存储每个work进行步数 shape 是（num_workers，）每个元素表示对应worker当前的步数，每当worker完成一个episode时就重置为0
+        # 看起来存储每个work进行步数 shape 是（num_workers，）每个元素表示对应worker当前的步数，每当worker完成一个episode时就重置为0
+        # 主要是用在样本采集时，每个work的当前步数
         self.worker_current_episode_step = torch.zeros((self.num_workers, ), dtype=torch.long)
         # Reset workers (i.e. environments)
         # 初始化环境并获取第一帧观察
@@ -79,6 +80,7 @@ class PPOTrainer:
 
         # Setup placeholders for each worker's current episodic memory
         # 这里的memeory存储的是transformer中每个时间步的历史记忆项，用来和后续的最新观察组合预测最新的策略、价值
+        # 注意这里的历史记忆是当前回合的历史记忆，一旦一个游戏结束后就会将memory存储到buffer中，并且重置当前work的memory为全零，开始新的回合的记忆积累
         self.memory = torch.zeros((self.num_workers, self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
         # Generate episodic memory mask used in attention
         # 构建一个最大记忆长度的下三角矩阵
@@ -123,7 +125,6 @@ class PPOTrainer:
             clip_range = polynomial_decay(self.cr_schedule["initial"], self.cr_schedule["final"], self.cr_schedule["max_decay_steps"], self.cr_schedule["power"], update)
 
             # Sample training data
-            # todo 后续看这里
             sampled_episode_info = self._sample_training_data()
 
             # Prepare the sampled data inside the buffer (splits data into sequences)
@@ -170,6 +171,7 @@ class PPOTrainer:
         # Init episodic memory buffer using each workers' current episodic memory
         # todo 这是在干啥
         # 只能看出为每个采集work单独设立缓冲区
+        # 利用索引，经过之前构建的memory_indices表，来为每个work设置对应的memory window索引
         self.buffer.memories = [self.memory[w] for w in range(self.num_workers)]
         # 这里应该是为每一个buffer设置workid
         for w in range(self.num_workers):
@@ -182,7 +184,7 @@ class PPOTrainer:
                 # Store the initial observations inside the buffer 存储每步的观察
                 self.buffer.obs[:, t] = torch.tensor(self.obs) 
                 # Store mask and memory indices inside the buffer
-                # torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)： 限制每个步数不能超过model的记忆长度，超过了就一直取最后一个位置的记忆窗口
+                # torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)： 限制每个步数不能超过model的记忆长度，超过了就一直取最大记忆长度
                 # 从memory_mask中提取对应步数的记忆掩码，存储在buffer中，确认当前能看到的范围
                 self.buffer.memory_mask[:, t] = self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)]
                 # 从memory_indices中提取对应步数的记忆索引，存储在buffer中，即在当前步中应该查看episode memory中的哪几个位置
@@ -199,16 +201,16 @@ class PPOTrainer:
                 self.memory[self.worker_ids, self.worker_current_episode_step] = memory
 
                 # Sample actions from each individual policy branch
-                actions = []
-                log_probs = []
+                actions = [] # 存储每个动作分支采样的动作
+                log_probs = [] # 存储每个动作分支采样的动作对应的对数概率
                 for action_branch in policy: # 对每一个动作分支进行遍历
                     action = action_branch.sample() # 采样动作
                     actions.append(action)
                     log_probs.append(action_branch.log_prob(action)) # 动作对应的对数概率
                 # Write actions, log_probs and values to buffer 存储预测的动作、动作的对数概率、状态价值
-                self.buffer.actions[:, t] = torch.stack(actions, dim=1)
-                self.buffer.log_probs[:, t] = torch.stack(log_probs, dim=1)
-                self.buffer.values[:, t] = value
+                self.buffer.actions[:, t] = torch.stack(actions, dim=1) # 存储每个动作分支采样的动作
+                self.buffer.log_probs[:, t] = torch.stack(log_probs, dim=1) # 存储每个动作分支采样的动作对应的对数概率
+                self.buffer.values[:, t] = value # 存储状态价值
 
             # Send actions to the environments 将动作发送到环境中执行
             for w, worker in enumerate(self.workers):
@@ -229,15 +231,15 @@ class PPOTrainer:
                     # Get data from reset
                     obs = worker.child.recv()
                     # Break the reference to the worker's memory
-                    mem_index = self.buffer.memory_index[w, t] # todo
-                    self.buffer.memories[mem_index] = self.buffer.memories[mem_index].clone()
-                    # Reset episodic memory
+                    mem_index = self.buffer.memory_index[w, t] # 获取当前的采集的一个回合的观察记忆是对应哪个index，后续根据这个index到self.buffer.memories中找到对应的记忆
+                    self.buffer.memories[mem_index] = self.buffer.memories[mem_index].clone() # 备份当前回合的记忆
+                    # Reset episodic memory 由于游戏结束，则重置对应work的历史记忆，应该是将对应work的历史记忆清零
                     self.memory[w] = torch.zeros((self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
-                    if t < self.config["worker_steps"] - 1:
+                    if t < self.config["worker_steps"] - 1: # todo 这里啥时候可以达到或者超过self.config["worker_steps"] - 1:
                         # Store memory inside the buffer
-                        self.buffer.memories.append(self.memory[w])
+                        self.buffer.memories.append(self.memory[w]) # 将构建的新的历史记忆缓冲区添加到memories，用于后续的使用
                         # Store the reference of to the current episodic memory inside the buffer
-                        self.buffer.memory_index[w, t + 1:] = len(self.buffer.memories) - 1
+                        self.buffer.memory_index[w, t + 1:] = len(self.buffer.memories) - 1 # 更新buffer中对应work的memory index，指向新的memory
                 else:
                     # Increment worker timestep
                     self.worker_current_episode_step[w] +=1 # 更新每个work当前的步数
@@ -245,7 +247,7 @@ class PPOTrainer:
                 self.obs[w] = obs # 这里是更新最新的obs
                             
         # Compute the last value of the current observation and memory window to compute GAE
-        last_value = self.get_last_value() # 这里应该是计算最后一步的价值
+        last_value = self.get_last_value() # 这里应该是计算最后一步的价值，避免因为假done导致模型误以为游戏结束了，导致最后一步的奖励和优势函数计算错误
         # Compute advantages
         self.buffer.calc_advantages(last_value, self.config["gamma"], self.config["lamda"])
 
@@ -254,10 +256,13 @@ class PPOTrainer:
     def get_last_value(self):
         """Returns:
                 {torch.tensor} -- Last value of the current observation and memory window to compute GAE"""
+        # 这里的start和end是一个batch，对应每个work当前所需要的start 和 end
         start = torch.clip(self.worker_current_episode_step - self.memory_length, 0)
         end = torch.clip(self.worker_current_episode_step, self.memory_length)
         indices = torch.stack([torch.arange(start[b],end[b]) for b in range(self.num_workers)]).long()
+        # 根据索引选择对应的历史记忆，因为模型有一个记忆窗口
         sliced_memory = batched_index_select(self.memory, 1, indices) # Retrieve the memory window from the entire episode
+        # 预测当前状态下的价值
         _, last_value, _ = self.model(torch.tensor(self.obs),
                                         sliced_memory, self.memory_mask[torch.clip(self.worker_current_episode_step, 0, self.memory_length - 1)],
                                         self.buffer.memory_indices[:,-1])
