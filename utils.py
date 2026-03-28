@@ -17,7 +17,6 @@ def create_env(config:dict, render:bool=False):
 
     Returns:
         {env}: Returns the selected environment instance. 返回创建号的环境实例
-        todo 先看PocMemoryEnv 在看Minigrid
 
         这里创建环境，没有看到特殊的包装器，可能是因为自己
     """
@@ -29,7 +28,7 @@ def create_env(config:dict, render:bool=False):
         return CartPole(mask_velocity=True)
     if config["type"] == "Minigrid":
         return Minigrid(config["name"])
-    # todo 据说这里是将不同的环境封装为统一的调用环境接口，感觉这里是应该是将其他的游戏环境（"SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"）进行包装
+    # 这里是将不同的环境封装为统一的调用环境接口，感觉这里是应该是将其他的游戏环境（"SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"）进行包装
     if config["type"] in ["SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"]:
         return MemoryGymWrapper(env_name = config["name"], reset_params=config["reset_params"], realtime_mode=render)
 
@@ -62,7 +61,6 @@ def batched_index_select(input, dim, index):
     The output tensor is of shape (batch_size, num_indices, ...), where ... means any number of additional dimensions that were present in the input tensor.
 
     这里应该是类似根据index从input中第dim个维度获取对应的张量信息
-    todo 在看具体的执行流程
 
     Arguments:
         input {torch.tensor} -- Input tensor 输入的tensor

@@ -111,7 +111,7 @@ class TransformerBlock(nn.Module):
         # Setup GTrXL if used
         self.use_gtrxl = config["gtrxl"] if "gtrxl" in config else False
         if self.use_gtrxl:
-            # todo 这里的关键，使用了GTrXL
+            # 这里的关键，使用了GTrXL
             self.gate1 = GRUGate(embed_dim, config["gtrxl_bias"])
             self.gate2 = GRUGate(embed_dim, config["gtrxl_bias"])
 
@@ -249,8 +249,8 @@ class Transformer(nn.Module):
         Arguments:
             h {torch.tensor} -- Input (query) 当前的观察
             memories {torch.tesnor} -- Whole episoded memories of shape (N, L, num blocks, D) 历史记忆
-            mask {torch.tensor} -- Attention mask (dtype: bool) of shape (N, L) todo 观察掩码，可能是用于最开始的几步时候看不到未来
-            memory_indices {torch.tensor} -- Memory window indices (dtype: long) of shape (N, L) todo 这个应该是序列的位置索引，用来说明当前应该是哪个时间步的位置
+            mask {torch.tensor} -- Attention mask (dtype: bool) of shape (N, L) 观察掩码，可能是用于最开始的几步时候看不到未来
+            memory_indices {torch.tensor} -- Memory window indices (dtype: long) of shape (N, L) 这个应该是序列的位置索引，用来说明当前应该是哪个时间步的位置，从位置编码器中，根据这个位置索引来获取对应的位置信息，然后加到记忆中去
         Returns:
             {torch.tensor} -- Output of the entire transformer encoder
             {torch.tensor} -- Out memories (i.e. inputs to the transformer blocks)
@@ -304,7 +304,7 @@ class Transformer(nn.Module):
 class GRUGate(nn.Module):
     """
     Overview:
-    这里是GTrXL的关键代码 todo
+    这里是GTrXL的关键代码
     一个门控单元决定：
 
     保留多少旧信息
@@ -322,7 +322,7 @@ class GRUGate(nn.Module):
             initializes the agent close to a Markovian policy (ignore attention at the beginning). (default: {0.0})
         """
         super(GRUGate, self).__init__()
-        # todo 这里是啥，构建这么多线性层
+        # 这里是构建GRU门控单元的线性层
         self.Wr = nn.Linear(input_dim, input_dim, bias=False)
         self.Ur = nn.Linear(input_dim, input_dim, bias=False)
         self.Wz = nn.Linear(input_dim, input_dim, bias=False)

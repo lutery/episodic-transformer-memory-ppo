@@ -236,7 +236,7 @@ class PPOTrainer:
                     self.buffer.memories[mem_index] = self.buffer.memories[mem_index].clone() # 备份当前回合的记忆
                     # Reset episodic memory 由于游戏结束，则重置对应work的历史记忆，应该是将对应work的历史记忆清零
                     self.memory[w] = torch.zeros((self.max_episode_length, self.num_blocks, self.embed_dim), dtype=torch.float32)
-                    if t < self.config["worker_steps"] - 1: # todo 这里啥时候可以达到或者超过self.config["worker_steps"] - 1:
+                    if t < self.config["worker_steps"] - 1: # 如果还未到最大的采样步数就结束了，因为还需要继续采集，所以需要构建新的缓冲区存储采集的样本
                         # Store memory inside the buffer
                         self.buffer.memories.append(self.memory[w]) # 将构建的新的历史记忆缓冲区添加到memories，用于后续的使用
                         # Store the reference of to the current episodic memory inside the buffer
@@ -323,7 +323,7 @@ class PPOTrainer:
         # entropies： 存储每一个动作分支的熵值，shape 应该是（num_actions_branchs, B） 
         log_probs, entropies = [], []
         for i, policy_branch in enumerate(policy):
-            # samples["actions"][:, i]: 遍历采集样本的每一个动作分支 todo 看看具体是如何采集保存的？还是不是每一个分支而是本身就要遍历每一个离散动作？
+            # samples["actions"][:, i]: 遍历采集样本的每一个动作分支 。看看具体是如何采集保存的？还是不是每一个分支而是本身就要遍历每一个离散动作？ 对，采集时对每个分支的动作进行采样，然后stack拼接在一起
             # 或者每一个执行动作的log概率
             log_probs.append(policy_branch.log_prob(samples["actions"][:, i]))
             entropies.append(policy_branch.entropy())
@@ -345,14 +345,14 @@ class PPOTrainer:
         policy_loss = policy_loss.mean()
 
         # Value  function loss
-        sampled_return = samples["values"] + samples["advantages"] # todo 这里的values和我看过的ppo算法哪个部分比较相似？这里的sampled_return应该是要预测的回报值
+        sampled_return = samples["values"] + samples["advantages"] # 这里的sampled_return应该是要预测的回报值，状态价值+优势=回报
         # 这里的值可以认为是预测的value，只是通过其他的方法实现不让预测的value过于偏离采集时的value，增加训练的稳定性
         clipped_value = samples["values"] + (value - samples["values"]).clamp(min=-clip_range, max=clip_range) 
         # 这里取max可以这里理解，一开始sampled_return和value很远，和clipped_value很近
         # 一开始更新的时候取value - sampled_return
         # 随着训练，value - sampled_return逐渐接近，离clipped_value - sampled_return越远，为了避免
         # 更新过大，然后如果一旦超过了裁剪范围，那么久重新让预测的值拉回到裁剪范围内（有可能也不会拉，因为一旦clap后，梯度就是0了），远离sampled_return的值，避免过拟合，提高鲁棒性
-        # todo 这里不会是可重复使用历史训练记录的ppo吧？待排查
+        # 这里不会是可重复使用历史训练记录的ppo吧？实际上也是one-policy,只是ppo会将一段样本进行多次重复训练，但每次训练的样本都是最新采集的，之前的样本在训练后就丢弃了，不会被重复使用
         vf_loss = torch.max((value - sampled_return) ** 2, (clipped_value - sampled_return) ** 2)
         vf_loss = vf_loss.mean() # 训练预测价值损失
 
